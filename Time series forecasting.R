@@ -1,0 +1,437 @@
+# Initializing the dataset
+library(readxl)
+library(lubridate)
+library(forecast)
+
+# Loading the cleaned dataset
+Traffic_Paris_Orly <- read_excel("Traffic Paris Orly YTD dec 2024.xlsx",
+                                 sheet = "Paris Aéroport PAX&ATM",
+                                 col_types = c("date", "numeric"))
+
+# Ensure column names match expectations
+colnames(Traffic_Paris_Orly) <- c("Date", "Traffic")
+
+
+# Transformation into a time series object
+trafic <- ts(Traffic_Paris_Orly$Traffic,  
+             start = c(year(min(Traffic_Paris_Orly$Date)), 
+                       month(min(Traffic_Paris_Orly$Date))), 
+             frequency = 12)
+
+# Print the time series
+print(trafic)
+
+# Visualize the time series
+plot.ts(trafic, main = "Passenger Traffic at Paris-Orly (2000-2024)", 
+        ylab = "Traffic", xlab = "Year")
+
+# Time series description
+# The time series covers monthly passenger traffic data at Paris-Orly airport from January 2000 to December 2024.
+# It comprises 12 observations per year, corresponding to a monthly tracking of passenger numbers. 
+# The series shows steady traffic growth over time, indicating increasing air transport demand. 
+# A strong seasonal pattern is also evident, with regular variations each year and a particular period corresponding to the covid time with extreme values
+
+#At a first glance the series seems not stationnary (non constant variance, increasing trend, strong seasonality)
+
+
+
+
+# ACF
+acf(ts(trafic, frequency=1), main="Autocorrelogram main series")
+
+# The bars in the ACF decay slowly and remain significant across many lags, indicating non-stationarity in the series.
+
+
+pacf(ts(trafic, frequency=1), main="Partial autocorrelogram main series")
+
+# strong spike at lag 1, presence of trends and seasonnal effects suggests the non stationnarity issue 
+
+# 1st transformation, log to reduce variance
+
+log_trafic <- log(trafic)
+
+plot.ts(log_trafic,  main = "log of Passenger Traffic at Paris-Orly (2000-2024)")
+acf(ts(log_trafic, frequency=1), main="Autocorrelogram  log(series)")
+pacf(ts(log_trafic, frequency=1), main="Partial autocorrelogram log(series)")
+
+# The log transformation has stabilized the variance but a spike remains in 2020 due to the covid period which could still affect stationnarity
+# The ACF shows a reduction in autocorrelation at higher lags compared to the raw series but the first lags are  still significant
+# First lag is still significant like the raw series
+# The log serie is still non stationnary
+
+# 2nd Transformation, first order difference
+
+diff1_trafic <- diff(log_trafic,1)
+
+plot.ts(diff1_trafic,  main = "1st difference order of Passenger Traffic at Paris-Orly (2000-2024)")
+
+acf(ts(diff1_trafic, frequency=1), main="Autocorrelogram  1st difference of log(series)")
+
+
+pacf(ts(diff1_trafic, frequency=1), main="Partial autocorrelogram 1st difference of log(series)")
+
+
+# The fluctuations are around 0, the trend has been removed even if there is still some noise around 2020
+# The ACF shows a significant spike at lag 1, followed by quick decay to near-zero values at higher lags
+# The PACF shows a significant spike at lag 1, with subsequent lags being mostly within the confidence intervals.
+# We will continue and proceed to a third transformation
+
+# 3rd transformation, 12th order difference
+diff12_trafic <- diff(diff1_trafic,12)
+
+plot.ts(diff12_trafic,  main = "12th difference order of Passenger Traffic at Paris-Orly (2000-2024)")
+
+acf(ts(diff12_trafic, frequency=1), main="Autocorrelogram  12th difference order")
+
+pacf(ts(diff12_trafic, frequency=1), main="Partial autocorrelogram 12th difference order")
+
+# After seasonal differencing, the series appears stationary, as indicated by:
+# Fluctuations around zero in the time series plot and the extreme values are less pronounced
+# Rapid decay of the ACF.
+# Minimal significant lags in the PACF beyond lag 1 that stays within the confidence interval
+# So the series seems stationarity now but we will try to flag the covid period and create a dummy to tell the model to not take into account this period
+
+
+# Handling outliers
+# Identify the extreme dates
+# Define the COVID-19 period
+covid_start <- as.Date("2020-03-01")
+covid_end <- as.Date("2021-06-01")
+
+# Create a dummy variable for the COVID-19 period
+Traffic_Paris_Orly$dummy_covid <- ifelse(Traffic_Paris_Orly$Date >= covid_start & Traffic_Paris_Orly$Date <= covid_end, 1, 0)
+
+dummy_covid <- Traffic_Paris_Orly$dummy_covid[-c(1:13)]
+
+
+# 1st Model
+# Choice of parameters
+# p=1 PACF shows a spike at lag 1
+# q=1 ACF shows a spike at lag 1
+# d = 0 
+# P = 1 PACF shows a seasonal lag
+# Q = 1 same
+# D = 1 12th difference order
+# s=12
+
+dummy_covid_ts <- ts(dummy_covid, 
+                     start = start(diff12_trafic), 
+                     frequency = 12)
+
+# Fit a SARIMA model with dummy variable for COVID-19
+model_1 <- Arima(diff12_trafic, 
+                 order = c(1, 0, 1),           
+                 seasonal = c(1, 1, 1),      
+                 xreg = dummy_covid_ts)       
+
+
+summary(model_1)
+
+
+checkresiduals(model_1)
+
+
+# Checking of the pvalues of the coefficients
+coefs <- coef(model_1)      
+se <- sqrt(diag(vcov(model_1))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+
+# All the pvalues are significant except the xreg which correspond to our covid period. So we have 2 choices, we can remove the xreg variable or we can try to create to change it
+
+
+model_1_sxreg <- Arima(diff12_trafic, 
+                       order = c(1, 0, 1),           
+                       seasonal = c(1, 1, 1))
+
+
+summary(model_1_sxreg)
+
+
+checkresiduals(model_1_sxreg)
+
+# Checking of the pvalues of the coefficients
+coefs <- coef(model_1_sxreg)      
+se <- sqrt(diag(vcov(model_1_sxreg))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+
+# The coefficients are still significative without the xreg and the model is even slightly better but if we look at the residuals they seem to not be good so we need to apply an xreg for the COVID period but this time it will be created differently, we will create monthly dummies 
+
+
+covid_months <- seq(from = as.Date("2020-03-01"), to = as.Date("2021-06-01"), by = "month")
+
+dummies <- as.data.frame(outer(Traffic_Paris_Orly$Date, covid_months, "==") * 1)
+
+
+colnames(dummies) <- paste0("dummy_", format(covid_months, "%Y_%m"))
+
+Traffic_Paris_Orly <- cbind(Traffic_Paris_Orly, dummies)
+
+dummies <- dummies[-(1:13), ] 
+
+head(Traffic_Paris_Orly[, c("Date", paste0("dummy_", format(covid_months, "%Y_%m")))], 15)
+
+
+model_2 <- Arima(diff12_trafic, 
+                 order = c(1, 0, 1), 
+                 seasonal = c(1, 1, 1), 
+                 xreg = as.matrix(dummies))
+
+
+summary(model_2)
+
+checkresiduals(model_2)
+
+coefs <- coef(model_2)      
+se <- sqrt(diag(vcov(model_2))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+
+# The model with new xreg is way better that the previous one, all coefficient are significant except some dummies like the 09_2020, the model performs better with a negative AIC and BIC, the residuals still shows autocorrelation, we will run the model again without the non significant coefficient : dummy_2020_05, dummy_2020_09, dummy_2020_10, dummy_2021_01, dummy_2021_02, dummy_2021_03, dummy_2021_05
+
+
+significant_dummies <- c("dummy_2020_03", "dummy_2020_04", "dummy_2020_06", 
+                         "dummy_2020_07", "dummy_2020_08", "dummy_2020_12", 
+                         "dummy_2021_04", "dummy_2021_06")
+
+reduced_dummies <- dummies[, significant_dummies]
+
+
+model_3 <- Arima(diff12_trafic, 
+                 order = c(1, 0, 1), 
+                 seasonal = c(1, 1, 1), 
+                 xreg = as.matrix(reduced_dummies))
+
+summary(model_3)
+
+checkresiduals(model_3)
+
+coefs <- coef(model_3)      
+se <- sqrt(diag(vcov(model_3))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+
+# All ARIMA coefficients are significant, except sar1, which is marginally insignificant.
+# The included dummies are all significant, confirming their impact during the COVID-19 period.
+# The metrics indicate a good fit and stability, with a slight improvement over the full-dummy model.
+# ACF of residuals shows some spikes at lag 12, indicating potential remaining seasonality.
+# The Ljung-Box test suggests significant autocorrelation in residuals
+# We need to solve the residuals issue to start the forecast, we will change P in the model, P=2 because 
+
+
+model_4 <- Arima(diff12_trafic, 
+                 order = c(1, 0, 1), 
+                 seasonal = c(2, 1, 1), 
+                 xreg = as.matrix(reduced_dummies))
+
+
+summary(model_4)
+
+checkresiduals(model_4)
+
+coefs <- coef(model_4)      
+se <- sqrt(diag(vcov(model_4))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+shapiro_test <- shapiro.test(residuals(model_4))
+
+print(shapiro_test)
+
+# The ARIMA terms are all significant, while sar2 (p = 0.228) is not.
+# All retained dummies are highly significant, confirming their contribution.
+# The AIC and BIC values remain comparable to earlier models
+# The residual ACF shows reduced autocorrelation, but some spikes remain at lag 12.
+# The Ljung-Box test still highlights significant residual autocorrelation.
+# The residual histogram indicates approximate normality, with a few outliers but the Shapiro test shows p < 0,05 so the residuals do not follow a normal distribution
+# We will try a last model with Q = 2 
+
+
+model_5 <- Arima(diff12_trafic, 
+                 order = c(1, 0, 1), 
+                 seasonal = c(2, 1, 2), 
+                 xreg = as.matrix(reduced_dummies))
+
+
+summary(model_5)
+
+checkresiduals(model_5)
+coefs <- coef(model_5)      
+se <- sqrt(diag(vcov(model_5))) 
+
+
+z_stat <- coefs / se  
+p_values <- 2 * (1 - pnorm(abs(z_stat)))  
+
+coef_table <- data.frame(
+  Coefficient = coefs,
+  Std.Error = se,
+  Z.Value = z_stat,
+  P.Value = p_values
+)
+print(coef_table)
+
+shapiro_test <- shapiro.test(residuals(model_5))
+
+print(shapiro_test)
+
+# The ARIMA terms are all significant.
+# - The seasonal terms:
+#   - sar2 is not significant .
+#   - sma2 is significant.
+# - All retained dummies are highly significant (p < 0.05)
+
+# The model balances complexity and fit but does not improve substantially over simpler configurations.
+
+# The residual ACF shows some remaining spikes, particularly at lag 12, indicating potential unmodeled seasonality.
+# The Shapiro-Wilk test indicates significant deviation from normality.
+# - The Ljung-Box test  highlights residual autocorrelation, suggesting the model does not fully capture all patterns in the data.
+
+
+# Based on the analysis of all tested models, the SARIMA(1,0,1)(2,1,1)[12 so the model_4] is recommended as the best compromise between performance, simplicity, and residual diagnostics.
+
+# AIC = -95.34, BIC = -48.92.
+# RMSE and MAE metrics are competitive with more complex models.
+# Fewer seasonal parameters compared to SARIMA(1,0,1)(2,1,2)[12], reducing risk of overfitting.
+# The residual ACF shows improved behavior with reduced autocorrelation at lag 12.
+# Although residuals still deviate from normality, they are acceptable for forecasting purposes.
+# But Residual autocorrelation and non-normality persist to some degree, which may affect confidence intervals.
+
+
+# In sample and out of sample analysis
+# Dataset spliting
+train_data <- window(diff12_trafic, end = c(2023, 12))
+test_data <- window(diff12_trafic, start = c(2024, 1))
+
+
+model_train <- Arima(train_data, 
+                     order = c(1, 0, 1), 
+                     seasonal = c(2, 1, 1), 
+                     xreg = as.matrix(reduced_dummies[1:length(train_data), ]))
+
+
+forecast_test <- forecast(model_train, 
+                          h = length(test_data), 
+                          xreg = as.matrix(reduced_dummies[(length(train_data) + 1):nrow(reduced_dummies), ]))
+
+accuracy(forecast_test, test_data)
+plot(forecast_test, main = "Validation Out-of-Sample (2024)")
+lines(test_data, col = "red")  # Ajouter les données réelles
+legend("topleft", legend = c("Predictions", "Reality"), col = c("blue", "red"), lty = 1)
+
+# Zoom on 2024
+plot(test_data, col = "red", main = "Zoom: Validation Out-of-Sample (2024)",
+     xlab = "Months", ylab = "Residuals", xlim = c(2024, 2025))
+lines(forecast_test$mean, col = "blue")
+legend("topleft", legend = c("Predictions", "Reality"), col = c("blue", "red"), lty = 1)
+
+
+
+# In-Sample Validation: The training set errors are low, with an RMSE of 0.1839 and an MAE of 0.0886. 
+# The residual autocorrelation ACF1 is negligible, indicating a good model fit to the historical data.
+# Out-of-Sample Validation: Performance on the test set shows a slightly higher RMSE of 0.1917 and an MAE of 0.1312.
+
+# Graphical Analysis: The model correctly predicts general trends, but has difficulty in capturing significant local variations.
+
+# Forecast 
+# Create new dummies
+future_dummies <- matrix(0, nrow = 3, ncol = ncol(reduced_dummies))
+colnames(future_dummies) <- colnames(reduced_dummies)
+
+# Forecast 
+forecast_future <- forecast(model_4, h = 3, xreg = future_dummies)
+
+plot(forecast_future, main = "Prediction for the next 3 months (2025)",
+     xlab = "Months", ylab = "Trafic")
+
+# Zoom on 2025
+plot.ts(forecast_future$mean, main = "Zoom: Forecast for the Next 3 Months (2025)",
+        xlab = "Months", ylab = "Passenger Traffic", xlim = c(2025, 2025.25))
+lines(forecast_future$mean, col = "blue")
+
+
+# Forecast on initial data
+
+last_original_value <- tail(Traffic_Paris_Orly$Traffic, 1)
+
+forecast_on_original_scale <- exp(cumsum(c(log(last_original_value), forecast_future$mean)))
+
+last_date <- tail(time(ts(Traffic_Paris_Orly$Traffic, frequency = 12, start = c(2000, 1))), 1)
+
+historical_zoom <- window(ts(Traffic_Paris_Orly$Traffic, frequency = 12, 
+                             start = c(2000, 1)), start = c(2024, 1), end = last_date)
+
+
+forecast_on_original_scale_aligned <- exp(cumsum(c(log(tail(historical_zoom, 1)), forecast_future$mean)))
+
+
+plot.ts(historical_zoom, main = "Forecast on Original Scale (Zoomed: 2024-2025)",
+        xlab = "Time", ylab = "Passenger Traffic", col = "black", lwd = 2, 
+        xlim = c(2024, 2025), ylim = range(c(historical_zoom, forecast_on_original_scale_aligned)))
+
+lines(ts(forecast_on_original_scale_aligned, start = c(2024, 12), frequency = 12), col = "blue", lwd = 2)
+
+
+legend("topleft", legend = c("Historical Data", "Forecast"), 
+       col = c("black", "blue"), lty = c(1, 1), lwd = c(2, 2))
+
+
+
+# General Trend: The forecast (blue line) aligns smoothly with the historical data (black line), suggesting the model captures the overall trend well.
+# Stability : The forecast appears stable for the first months of 2025, with no extreme fluctuations, reflecting the seasonal and trend components learned by the model.
+# Transition from Historical Data : The transition between the historical data and the forecast is seamless, indicating that the last observations of the training data were effectively incorporated into the model's predictions.
